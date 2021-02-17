@@ -1,0 +1,17 @@
+#Require Python 3.7 in order to use annotation library
+ipywidgets
+numpy==1.16.4
+scipy
+tensorflow<2.0
+Pillow
+psutil
+matplotlib
+jupyter
+pandas>0.25
+scikit-learn
+pytorch
+torchvision
+seaborn
+tqdm
+joblib
+pympler
