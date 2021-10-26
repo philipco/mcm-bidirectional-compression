@@ -1,7 +1,7 @@
 """
 Created by Philippenko, 6th March 2020.
 """
-
+from src.machinery.LocalUpdate import AbstractLocalUpdate
 from src.machinery.Parameters import Parameters
 
 
@@ -12,11 +12,12 @@ class Worker:
     and a local update method (to carry out the local step of the federated gradient descent).
     """
 
-    def __init__(self, ID : int, parameters: Parameters, localUpdate) -> None:
+    def __init__(self, ID : int, parameters: Parameters, localUpdate: AbstractLocalUpdate) -> None:
         super().__init__()
         self.local_update = localUpdate(parameters)
         self.idx_last_update = 0
         self.ID = ID
+        self.nb_inside_it = 0
 
     def set_idx_last_update(self, j: int):
         self.idx_last_update = j

@@ -11,7 +11,6 @@ from sklearn.mixture import GaussianMixture
 import seaborn as sns
 import numpy as np
 import matplotlib.pyplot as plt
-from sklearn.preprocessing import scale
 
 from src.utils.data.DataPreparation import add_bias_term
 
@@ -23,14 +22,18 @@ def palette(nb_cluster: int = 10):
 
 
 def tsne(data):
+    """Compute the TSNE representation of a dataset."""
+    np.random.seed(25)
     tsne = TSNE()
-    X_embedded = tsne.fit_transform(scale(data))
+    X_embedded = tsne.fit_transform(data)
     fig, ax = plt.subplots(figsize=dim_tnse_fig)
     sns.scatterplot(X_embedded[:, 0], X_embedded[:, 1], ax=ax).set_title("TSNE - 2D representation of data")
     return X_embedded
 
 
-def find_cluster(embedded_data, nb_cluster: int = 10):
+def find_cluster(embedded_data, tsne_cluster_file, nb_cluster: int = 10):
+    """Find cluster in a dataset."""
+    np.random.seed(25)
     clustering = GaussianMixture(n_components=nb_cluster, random_state=0, tol=1e-6, n_init=4, max_iter=2000)\
         .fit(embedded_data)
     predicted_cluster = clustering.predict(embedded_data)
@@ -42,6 +45,8 @@ def find_cluster(embedded_data, nb_cluster: int = 10):
     plt.xticks(fontsize=20)
     # plt.title("Gaussian Mixture - Finding clusters in the TSNE", fontsize=20)
     ax.get_legend().remove()
+
+    plt.savefig('{0}.eps'.format(tsne_cluster_file), format='eps')
 
     return predicted_cluster
 
@@ -78,7 +83,9 @@ def clustering_data(data, predicted_cluster, column_name: str, nb_cluster: int =
     X = add_bias_term(X)
     return X, Y
 
+
 def rebalancing_clusters(X_origin, Y_origin):
+    """If the clusters are too unbalanced w.r.t. the number of elements, rebalance clusters."""
     X, Y = deepcopy(X_origin), deepcopy(Y_origin)
     do = True
     cpt = 0
@@ -106,8 +113,7 @@ def rebalancing_clusters(X_origin, Y_origin):
 
 def check_data_clusterisation(X, Y, nb_devices:int = 10):
     # Rebuilding data : removing columns of 1, merging all states, unsqueezing and finaly, merging features and states.
-    rebuild_data = torch.cat([torch.tensor(scale(torch.cat(Y)), dtype=torch.float64).unsqueeze(1), torch.cat(X)[:, 1:]],
-                             dim=1)
+    rebuild_data = torch.cat([torch.tensor(torch.cat(Y), dtype=torch.float64).unsqueeze(1), torch.cat(X)[:, 1:]], dim=1)
     label = [i for i in range(nb_devices) for j in range(len(X[i]))]
 
     # Running TSNE to find cluster.

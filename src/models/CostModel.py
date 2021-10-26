@@ -140,7 +140,6 @@ class LogisticModel(ACostModel):
         else:
             s = torch.sigmoid(self.Y * self.X.mv(w))
             grad = self.X.T.mv((s - 1) * self.Y) / n_sample
-        del s
         return grad
 
     def grad_i(self, w: torch.FloatTensor, x: torch.FloatTensor, y: torch.FloatTensor):
@@ -180,7 +179,7 @@ class RMSEModel(ACostModel):
 
     def __init__(self, X, Y, regularization: ARegularizationModel = NoRegularization()) -> None:
         super().__init__(X, Y, regularization)
-        assert len(torch.unique(Y)) > 2, "Y values must have at least 3 different values."
+        # assert len(torch.unique(Y)) > 2, "Y values must have at least 3 different values."
 
     def cost(self, w: torch.FloatTensor) -> Tuple[torch.FloatTensor, torch.FloatTensor]:
         n_sample = self.X.shape[0]

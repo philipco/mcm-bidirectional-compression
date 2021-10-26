@@ -2,7 +2,7 @@
 Created by Philippenko, 7th July 2020.
 """
 
-from src.machinery.GradientDescent import ArtemisDescent, SGD_Descent, DianaDescent, AGradientDescent, SympaDescent, \
+from src.machinery.GradientDescent import ArtemisDescent, SGD_Descent, DianaDescent, AGradientDescent, GhostDescent, \
     DownCompressModelDescent, FedAvgDescent
 from src.machinery.Parameters import Parameters
 from src.models.CompressionModel import *
@@ -72,15 +72,14 @@ class VanillaSGD(PredefinedParameters):
                           nb_epoch=nb_epoch,
                           fraction_sampled_workers=fraction_sampled_workers,
                           step_formula=step_formula,
-                          up_compression_model=SQuantization(0),
-                          down_compression_model=SQuantization(0),
+                          up_compression_model=SQuantization(0, dim=n_dimensions),
+                          down_compression_model=SQuantization(0, dim=n_dimensions),
                           stochastic=stochastic,
                           streaming=streaming,
                           batch_size=batch_size,
-                          bidirectional=False,
                           cost_models=cost_models,
                           use_averaging=use_averaging,
-                          use_memory=False
+                          use_up_memory=False
                           )
 
 class VanillaSGDMem(VanillaSGD):
@@ -141,7 +140,6 @@ class Diana(VanillaSGD):
         return params
 
 
-
 class DianaOneWay(VanillaSGD):
     """Predefine parameters to run Diana algorithm.
     """
@@ -200,12 +198,14 @@ class Artemis(Diana):
         params = super().define(cost_models, n_dimensions, nb_devices, up_compression_model, down_compression_model,
                                 step_formula, nb_epoch, fraction_sampled_workers, use_averaging,
                                 stochastic, streaming, batch_size)
-        params.use_down_memory = True
-        params.use_unique_up_memory = True
+        # Important settings to recover results provided in the paper !
+        params.use_down_memory = False
+        params.use_unique_up_memory = False
         params.down_compression_model = down_compression_model
         return params
 
-class ArtemisND(Diana):
+
+class ArtemisND(Artemis):
     """Predefine parameters to run Artemis algorithm.
     """
 
@@ -221,7 +221,6 @@ class ArtemisND(Diana):
         params = super().define(cost_models, n_dimensions, nb_devices, up_compression_model, down_compression_model,
                                 step_formula, nb_epoch, fraction_sampled_workers, use_averaging,
                                 stochastic, streaming, batch_size)
-        params.bidirectional = True
         params.non_degraded = True
         return params
 
@@ -255,7 +254,7 @@ class Sympa(Artemis):
         return "Sympa"
 
     def type_FL(self):
-        return SympaDescent
+        return GhostDescent
 
     def define(self, cost_models, n_dimensions: int, nb_devices: int, up_compression_model: CompressionModel, down_compression_model: CompressionModel,
                step_formula=None, nb_epoch: int = NB_EPOCH, fraction_sampled_workers: int = 1., use_averaging=False,
@@ -427,8 +426,8 @@ class Topk(PredefinedParameters):
                step_formula=None, nb_epoch: int = NB_EPOCH, fraction_sampled_workers: int = 1., use_averaging=False,
                stochastic=True, streaming=False, batch_size=1):
         parameters = self.super_class.define(cost_models, n_dimensions, nb_devices,
-                                    compression_model, step_formula, nb_epoch,
-                                    fraction_sampled_workers, use_averaging,stochastic, streaming, batch_size)
+                                             up_compression_model, step_formula, nb_epoch,
+                                             fraction_sampled_workers, use_averaging, stochastic, streaming, batch_size)
         parameters.up_compression_model = TopKSparsification(level, n_dimensions)
         parameters.down_compression_model = TopKSparsification(level, n_dimensions)
         return parameters
@@ -448,8 +447,8 @@ class RandkBiased(PredefinedParameters):
                step_formula=None, nb_epoch: int = NB_EPOCH, fraction_sampled_workers: int = 1., use_averaging=False,
                stochastic=True, streaming=False, batch_size=1):
         parameters = self.super_class.define(cost_models, n_dimensions, nb_devices,
-                                    compression_model, step_formula, nb_epoch,
-                                    fraction_sampled_workers, use_averaging,stochastic, streaming, batch_size)
+                                             up_compression_model, step_formula, nb_epoch,
+                                             fraction_sampled_workers, use_averaging, stochastic, streaming, batch_size)
         parameters.up_compression_model = RandomSparsification(level, n_dimensions, biased=False)
         parameters.down_compression_model = RandomSparsification(level, n_dimensions, biased=False)
         return parameters
@@ -469,8 +468,8 @@ class Randk(PredefinedParameters):
                step_formula=None, nb_epoch: int = NB_EPOCH, fraction_sampled_workers: int = 1., use_averaging=False,
                stochastic=True, streaming=False, batch_size=1):
         parameters = self.super_class.define(cost_models, n_dimensions, nb_devices,
-                                    compression_model, step_formula, nb_epoch,
-                                    fraction_sampled_workers, use_averaging,stochastic, streaming, batch_size)
+                                             up_compression_model, step_formula, nb_epoch,
+                                             fraction_sampled_workers, use_averaging, stochastic, streaming, batch_size)
         parameters.up_compression_model = RandomSparsification(level, n_dimensions, biased=False)
         parameters.down_compression_model = RandomSparsification(level, n_dimensions, biased=False)
         return parameters
@@ -490,7 +489,7 @@ class Quantiz(PredefinedParameters):
                step_formula=None, nb_epoch: int = NB_EPOCH, fraction_sampled_workers: int = 1., use_averaging=False,
                stochastic=True, streaming=False, batch_size=1):
         parameters = self.super_class.define(cost_models, n_dimensions, nb_devices,
-                                             compression_model, step_formula, nb_epoch,
+                                             up_compression_model, step_formula, nb_epoch,
                                              fraction_sampled_workers, use_averaging, stochastic, streaming, batch_size)
         parameters.up_compression_model = SQuantization(level_quantiz, n_dimensions)
         parameters.down_compression_model = SQuantization(level_quantiz, n_dimensions)
@@ -572,10 +571,10 @@ class MCM(ModelCompr):
                                 step_formula, nb_epoch, fraction_sampled_workers, use_averaging,
                                 stochastic, streaming, batch_size)
         params.use_down_memory = True
+        params.use_up_memory = True
         if fraction_sampled_workers != 1:
             print("Use randomized version of MCM due to partial participation.")
             params.randomized = True
-        params.use_unique_up_memory = False
         params.use_unique_up_memory = True
         params.use_unique_down_memory = True
         params.non_degraded = True
@@ -623,6 +622,10 @@ class MCM0(ModelCompr):
         params.down_learning_rate = 0
         if fraction_sampled_workers != 1:
             params.randomized = True
+
+        params.use_unique_up_memory = True
+        params.use_unique_down_memory = True
+
         return params
 
 
@@ -646,6 +649,10 @@ class MCM1(ModelCompr):
         params.down_learning_rate = 1
         if fraction_sampled_workers != 1:
             params.randomized = True
+
+        params.use_unique_up_memory = True
+        params.use_unique_down_memory = True
+
         return params
 
 
@@ -667,6 +674,8 @@ class MCMOneWay(MCM):
                                 stochastic, streaming, batch_size)
         params.up_compression_model = SQuantization(0, n_dimensions)
         params.down_compression_model = SQuantization(1, n_dimensions)
+        params.use_unique_up_memory = True
+        params.use_unique_down_memory = True
         return params
 
 
@@ -728,7 +737,8 @@ class RandMCM(MCM):
                                 step_formula, nb_epoch, fraction_sampled_workers, use_averaging,
                                 stochastic, streaming, batch_size)
         params.randomized = True
-        params.use_unique_up_memory = True
+        # Important settings to recover results provided in the paper !
+        params.use_unique_up_memory = False
         params.use_unique_down_memory = False
         return params
 
@@ -754,7 +764,7 @@ class RandMCM1Mem(RandMCM):
 class RandMCM1MemReset(RandMCM1Mem):
 
     def name(self) -> str:
-        return "R-MCM 1Mem"
+        return "R-MCM 1Mem Reset"
 
     def type_FL(self):
         return DownCompressModelDescent
@@ -785,6 +795,9 @@ class RandMCMOneWay(MCM):
         params = super().define(cost_models, n_dimensions, nb_devices, up_compression_model, down_compression_model,
                                 step_formula, nb_epoch, fraction_sampled_workers, use_averaging,
                                 stochastic, streaming, batch_size)
+        params.randomized = True
+        params.use_unique_up_memory = True
+        params.use_unique_down_memory = False
         params.up_compression_model = SQuantization(0, n_dimensions)
         params.down_compression_model = SQuantization(1, n_dimensions)
         return params
