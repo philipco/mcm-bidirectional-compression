@@ -2,16 +2,17 @@
 ipywidgets
 numpy==1.16.4
 scipy
-tensorflow<2.0
+#tensorflow<2.0
 Pillow
 psutil
 matplotlib
 jupyter
 pandas>0.25
 scikit-learn
-pytorch
+torch
 torchvision
 seaborn
 tqdm
 joblib
 pympler
+guppy3 # to profile memory

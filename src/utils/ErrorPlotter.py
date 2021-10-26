@@ -3,40 +3,47 @@ Created by Philippenko, 6th March 2020.
 
 This python file provide facilities to plot the results of a (multiple) gradient descent run.
 """
-import math
-
 import matplotlib
+matplotlib.rcParams.update({
+    "pgf.texsystem": "pdflatex",
+    'font.family': 'serif',
+    'text.usetex': True,
+    'pgf.rcfonts': False,
+})
+
 import matplotlib.pyplot as plt
 from mpl_toolkits.axes_grid1.inset_locator import zoomed_inset_axes, mark_inset
-from numpy import quantile
 
 from src.utils.Utilities import drop_nan_values, keep_until_found_nan
 
+# colors=["tab:blue", "tab:brown", "tab:orange", "tab:green", "tab:red", "tab:purple"]
 markers = ["o", "v", "s", "p", "X", "d", "P", "*", "<"]
 markersize = 1
 curve_size=4
-fontsize=30
-fontsize_legend=14
+fontsize=35
+fontsize_legend=19
 # figsize=(15,7)
 figsize=(8,7)
 fourfigsize=(13, 8)
 sixfigsize=(13, 11)
 
-Y_LEGENDS = {"loss": r"$\log_{10}(F(w^k) - F(w^*))$",
+Y_LEGENDS = {"loss": r"$\log_{10}(F(w_k) - F(w_*))$",
              "ef": r"$\log_{10}(\| \| EF_k \| \|)$",
              "rand_dist": r"$\log_{10}(\mathbb{E} \| \| w_k - w_k^i \| \|^2)$",
-             "rand_var": r"$\log_{10}( \| \| \mathbb{V}~[w_k^i] \| \| )$"}
+             "rand_var": r"$\log_{10}( \| \| \mathbb{V}~[w_k^i] \| \| )$",
+             "train_loss": r"$\log($Train loss$)$",
+             "test_loss": r"$\log($Test loss$)$",
+             "accuracy": "Accuracy",}
 
 nb_bars = 1  # = 3 when running 400 iterations, to plot 1 on nb_bars error bars.
 
 
-def plot_error_dist(all_losses, legend, nb_devices, nb_dim, batch_size=None, all_error=None,
-                    x_points=None, x_legend=None, one_on_two_points=True, xlabels=None,
-                    ylegends="loss", ylim=False, omega_c = None, picture_name=None):
+def plot_error_dist(all_losses, legend, all_error=None, x_points=None, x_legend=None, one_on_two_points=True,
+                    xlabels=None, ylegends="loss", ylim=False, omega_c = None, picture_name=None, zoom = None):
 
     assert ylegends in Y_LEGENDS.keys(), "Possible values for ylegend are : " + str([key for key in Y_LEGENDS.keys()])
 
-    legend = [l if l != "ArtemisEF" else "Dore" for l in legend]
+    # legend = [l if l != "Diana" else r"Art. $\omega_{C}^{dwn}=0$" for l in legend]
 
     N_it = len(all_losses[0])
 
@@ -46,10 +53,11 @@ def plot_error_dist(all_losses, legend, nb_devices, nb_dim, batch_size=None, all
     xlog = (x_points is not None)
 
     fig, ax = plt.subplots(figsize=figsize)
-    # if xlog:
-    #     axins = zoomed_inset_axes(ax, zoom=2.5, loc=3)
-    # else:
-    #     axins = zoomed_inset_axes(ax, zoom=3, loc=2)
+    if zoom is not None:
+        if xlog:
+            axins = zoomed_inset_axes(ax, zoom=2.5, loc=3)
+        else:
+            axins = zoomed_inset_axes(ax, zoom=5, loc="lower left")
     it = 0
 
     nb_curves = min(len(all_losses), len(markers))
@@ -66,9 +74,9 @@ def plot_error_dist(all_losses, legend, nb_devices, nb_dim, batch_size=None, all
         if all_error is not None:
             if one_on_two_points:
                 # if we plot error bar we don't take all elements
-                objectives_dist = [error_distance[0]] + list(error_distance[i + 1:N_it - 1:nb_bars * (len(all_losses)-1)]) + [
-                    error_distance[-1]]
-                abscisse = [abscisse[0]] + abscisse[i + 1:N_it - 1:nb_bars * (len(all_losses)-1)] + [abscisse[-1]]
+                objectives_dist = [error_distance[0]] + list(error_distance[i + 1:N_it - 1:nb_bars * (len(all_losses)-1)]) \
+                                  + [error_distance[-1]]
+                abscisse = [abscisse[0]] + list(abscisse[i + 1:N_it - 1:nb_bars * (len(all_losses)-1)]) + [abscisse[-1]]
 
                 error_to_plot = [all_error[i][0]] + list(all_error[i][i + 1:N_it - 1:nb_bars * (len(all_losses)-1)]) + [
                     all_error[i][-1]]
@@ -79,21 +87,18 @@ def plot_error_dist(all_losses, legend, nb_devices, nb_dim, batch_size=None, all
                 legend_i = legend_i + " {0}".format(str(omega_c[i]))[:4]
             ax.errorbar(abscisse, objectives_dist, yerr=error_to_plot, label=legend_i, lw=lw, marker=markers[it],
                          markersize=ms)
-            # setup_zoom(ax, axins, abscisse, objectives_dist, xlog, legend, i, it, ms, lw)
+            if zoom is not None:
+                setup_zoom(ax, axins, abscisse, objectives_dist, xlog, legend, i, it, ms, lw, zoom)
 
         else:
             objectives_dist = error_distance
             ax.plot(abscisse, objectives_dist, label=legend[i], lw=lw, marker=markers[it], markersize=ms)
-            # setup_zoom(ax, axins, abscisse, objectives_dist, xlog, legend, i, it, ms, lw)
+            if zoom is not None:
+                setup_zoom(ax, axins, abscisse, objectives_dist, xlog, legend, i, it, ms, lw, zoom)
         it += 1
 
-    if batch_size is None:
-        title_precision = "\n(N=" + str(nb_devices) +", d=" + str(nb_dim) + ")"
-    else:
-        title_precision = "\n(N=" + str(nb_devices) + ", d=" + str(nb_dim) + ", b=" + str(batch_size) + ")"
-
     x_legend = x_legend if x_legend is not None else "Number of passes on data"
-    setup_plot(x_legend + title_precision, ylegends=ylegends, xlog=xlog, xlabels=xlabels,
+    setup_plot(x_legend, ylegends=ylegends, xlog=xlog, xlabels=xlabels,
                ylim=ylim, picture_name=picture_name, ax=ax, fig=fig)
 
 
@@ -122,7 +127,7 @@ def plot_multiple_run_each_curve_different_objectives(x_points, all_losses, nb_d
 
 
 
-def setup_zoom(ax, axins, abscisse, objectives_dist, xlog, legend, i, it, ms, lw):
+def setup_zoom(ax, axins, abscisse, objectives_dist, xlog, legend, i, it, ms, lw, zoom):
 
     axins.plot(abscisse, objectives_dist, label=legend[i], lw=lw, marker=markers[it], markersize=ms)
 
@@ -131,8 +136,10 @@ def setup_zoom(ax, axins, abscisse, objectives_dist, xlog, legend, i, it, ms, lw
 
     max_x = abscisse[-1]
 
-    axins.set_xlim(390, 500)  # Limit the region for zoom
-    axins.set_ylim(-1.63, -1.4)
+    x1, x2, y1, y2 = zoom
+
+    axins.set_xlim(x1, x2)  # Limit the region for zoom
+    axins.set_ylim(y1, y2)
     plt.xticks(visible=False)  # Not present ticks
     plt.yticks(visible=False)
     ## draw a bbox of the region of the inset axes in the parent axes and
@@ -147,7 +154,7 @@ def setup_plot(xlegends, ylegends="loss", fontsize=fontsize, xticks_fontsize=fon
     if ylog:
         ax.yscale("log")
     if ylim:
-        ax.set_ylim(top=2)
+        ax.set_ylim(top=ylim)
     if xlog:
         ax.set_xscale("log")
     ax.tick_params(axis='both', labelsize=fontsize)
@@ -161,9 +168,12 @@ def setup_plot(xlegends, ylegends="loss", fontsize=fontsize, xticks_fontsize=fon
         plt.xticks(fontsize=xticks_fontsize)
     ax.set_xlabel(xlegends, fontsize=fontsize)
     ax.set_ylabel(Y_LEGENDS[ylegends], fontsize=fontsize)
-    ax.legend(loc='upper right', fontsize=fontsize_legend)
+    if ylegends == "accuracy":
+        ax.legend(loc='lower right', fontsize=fontsize_legend)
+    else:
+        ax.legend(loc='best', fontsize=fontsize_legend)
     fig.tight_layout()
-    if True:
+    if picture_name:
         plt.savefig('{0}.eps'.format(picture_name), format='eps')
     else:
         plt.show()

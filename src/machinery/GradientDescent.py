@@ -20,12 +20,8 @@ work correctly as soon as the update scheme method is correctly defined.
 """
 from __future__ import annotations
 
-from abc import ABC, abstractmethod
 import time
-from copy import copy
 
-import numpy as np
-import torch
 import math
 import os
 import psutil
@@ -36,17 +32,19 @@ from src.machinery.Parameters import Parameters
 from src.machinery.Worker import Worker
 from src.models.CompressionModel import SQuantization
 from src.utils.Constants import MAX_LOSS
+from src.utils.Utilities import pickle_loader
 
 
 class AGradientDescent(ABC):
     """
-    The AGradientDescent class declares the factory methods while subclasses provide
-    the implementation of this methods.
+    The AGradientDescent class declares the factory methods while subclasses provide the implementation of this methods.
+
+    This class carries out the whole gradient descent process.
     """
     # __slots__ = ('parameters', 'losses', 'model_params', 'model_params', 'averaged_model_params', 'averaged_losses',
     #              'workers', 'memory_info')
 
-    def __init__(self, parameters: Parameters) -> None:
+    def __init__(self, parameters: Parameters, algos_pickle_path: str) -> None:
         """Initialization of the gradient descent.
 
         It initialize all the worker of the network, the sequence of (averaged) losses,
@@ -57,36 +55,63 @@ class AGradientDescent(ABC):
         """
         super().__init__()
         self.parameters = parameters
-        self.losses = []
+        self.train_losses = []
         self.norm_error_feedback = []
         self.dist_to_model = [torch.tensor(0.)]
+        self.h_i_to_optimal_grad = []
         self.var_models = [torch.tensor(0.)]
-        self.model_params = []
-        self.averaged_model_params = []
-        self.averaged_losses = []
+        self.averaged_train_losses = []
         self.memory_info = None
+        if algos_pickle_path is not None:
+            if self.parameters.fraction_sampled_workers == 1:
+                self.optimal_grad = pickle_loader("{0}/../grads_min".format(algos_pickle_path))
+            else:
+                self.optimal_grad = pickle_loader("{0}/../../grads_min".format(algos_pickle_path))
+        else:
+            self.optimal_grad = None
 
         if self.parameters.use_up_memory and self.parameters.up_compression_model.omega_c != 0 and self.parameters.up_learning_rate is None:
-            self.parameters.up_learning_rate = 1 / (2 * (self.parameters.up_compression_model.omega_c + 1))
-        elif not self.parameters.use_up_memory:
+            self.parameters.up_learning_rate = self.parameters.up_compression_model.get_learning_rate()
+        elif not self.parameters.use_up_memory or self.parameters.up_compression_model.omega_c == 0:
             self.parameters.up_learning_rate = 0
         if self.parameters.use_down_memory and self.parameters.down_compression_model.omega_c != 0 and self.parameters.down_learning_rate is None:
-            self.parameters.down_learning_rate = 1 / (2 * (self.parameters.down_compression_model.omega_c + 1))
-        elif not self.parameters.use_down_memory:
+            self.parameters.down_learning_rate = self.parameters.down_compression_model.get_learning_rate()
+        elif not self.parameters.use_down_memory or self.parameters.down_compression_model.omega_c == 0:
             self.parameters.down_learning_rate = 0
+
+        if self.parameters.up_error_feedback or self.parameters.down_error_feedback:
+            # 1 / (2 * (self.parameters.up_compression_model.omega_c + 1))
+            self.parameters.error_feedback_coef =\
+                self.parameters.step_formula(1, self.parameters.cost_models[0].L,
+                                                  self.parameters.up_compression_model.omega_c,
+                                                  self.parameters.nb_devices)
 
         # Creating each worker of the network.
         self.workers = [Worker(i, parameters, self.__local_update__()) for i in range(self.parameters.nb_devices)]
 
         # Call for the update method of the gradient descent.
-        self.update = self.__update_method__()
+        self.update = self.__global_update__()
 
     @abstractmethod
-    def __update_method__(self) -> AbstractGradientUpdate:
-        """Factory method for the GD update procedure.
+    def __global_update__(self) -> AbstractGradientUpdate:
+        """Factory method for the GD global update procedure.
+
+        The global update is the process carried out on the central server to update the global model.
 
         Returns:
-            The update procedure for the gradient descent.
+            The global update procedure for the gradient descent.
+        """
+        pass
+
+    @abstractmethod
+    def __local_update__(self) -> AbstractLocalUpdate:
+        """Factory method for the GD local update procedure.
+
+        The local update is the process carried out on each worker to compute their local update tht will be sent to the
+        central server.
+
+        Returns:
+            The local update procedure used on each worker.
         """
         pass
 
@@ -123,12 +148,12 @@ class AGradientDescent(ABC):
             [0 for i in range(self.parameters.n_dimensions)])\
             .to(dtype=torch.float64)
 
-        self.model_params.append(current_model_param)
-        self.losses.append(self.update.compute_cost(current_model_param, cost_models))
+        # self.model_params.append(current_model_param)
+        self.train_losses.append(self.update.compute_cost(current_model_param, cost_models))
 
         if self.parameters.use_averaging:
-            self.averaged_model_params.append(self.model_params[-1])
-            self.averaged_losses.append(self.losses[-1])
+            averaged_model_params = current_model_param
+            self.averaged_train_losses.append(self.train_losses[-1])
 
         full_nb_iterations = 0
 
@@ -158,51 +183,27 @@ class AGradientDescent(ABC):
                 inside_loop_time += (time.time() - in_loop)
 
             # We add the past update because at this time, local update has not been yet updated.
-            self.model_params.append(past_model)
-            self.losses.append(self.update.compute_cost(self.model_params[-1], cost_models))
-            if self.parameters.randomized:
-                self.norm_error_feedback.append(torch.norm(torch.mean(torch.stack(self.update.all_error_i[-1]), dim=0), p=2))
-                self.dist_to_model.append(np.mean(
-                    [torch.norm(self.model_params[-1] - w.local_update.model_param)**2 for w in self.workers]
-                ))
-                self.var_models.append(torch.mean(
-                    torch.var(torch.stack([w.local_update.model_param for w in self.workers]))
-                ))
-
-            else:
-                self.norm_error_feedback.append(torch.norm(self.update.all_error_i[-1], p=2))
-
-            self.dist_to_model.append(np.mean(
-                [torch.norm(self.model_params[-1] - w.local_update.model_param) ** 2 for w in self.workers]
-            ))
-            # if (not self.parameters.randomized):
-            #     assert torch.all(torch.norm(self.model_params[-1] - self.workers[0].local_update.model_param) ** 2 == torch.tensor(0.0)), \
-            #         "The distance from central server and remote nodes is not null."
-            self.var_models.append(torch.mean(
-                torch.var(torch.stack([w.local_update.model_param for w in self.workers]))
-            ))
-            # The norm of error feedback has not been initialized. We initialize it now with the first value.
-            if len(self.norm_error_feedback) == 1:
-                self.norm_error_feedback.append(self.norm_error_feedback[0])
+            self.update_gradient_descent_info(past_model, cost_models)
 
             start_averaging_time = time.time()
             if self.parameters.use_averaging:
-                self.averaged_model_params.append(torch.mean(torch.stack(self.model_params), 0))
-                self.averaged_losses.append(self.update.compute_cost(self.averaged_model_params[-1], cost_models))
+                # Divion by (full_nb_iterations + 1) because this variable is initiliazed to 0.
+                averaged_model_params = averaged_model_params + (current_model_param - averaged_model_params) / (full_nb_iterations + 1)
+                self.averaged_train_losses.append(self.update.compute_cost(averaged_model_params, cost_models))
             averaging_time += time.time() - start_averaging_time
 
             if self.parameters.verbose:
                 if i == 1:
                     print(' | '.join([name.center(8) for name in ["it", "obj"]]))
                 if i % (nb_epoch / 5) == 0:
-                    print(' | '.join([("%d" % i).rjust(8), ("%.4e" % self.losses[-1]).rjust(8)]))
+                    print(' | '.join([("%d" % i).rjust(8), ("%.4e" % self.train_losses[-1]).rjust(8)]))
 
             # Beyond 1e9, we consider that the algorithm has diverged.
-            if self.losses[-1] == math.inf:
-                self.losses[-1] = MAX_LOSS
+            if self.train_losses[-1] == math.inf:
+                self.train_losses[-1] = MAX_LOSS
                 break
-            elif (self.losses[-1] > 1e9):
-                self.losses[-1] = MAX_LOSS
+            elif (self.train_losses[-1] > 1e9):
+                self.train_losses[-1] = MAX_LOSS
                 break
         end_time = time.time()
         elapsed_time = end_time - start_time
@@ -225,12 +226,12 @@ class AGradientDescent(ABC):
 
         # If we interrupted the run, we need to complete the list of loss to reach the number of iterations.
         # Otherwise it may later cause issues.
-        if len(self.losses) != self.parameters.nb_epoch:
-            self.losses = self.losses + [self.losses[-1] for i in range(self.parameters.nb_epoch - len(self.losses))]
+        if len(self.train_losses) != self.parameters.nb_epoch:
+            self.train_losses = self.train_losses + [self.train_losses[-1] for i in range(self.parameters.nb_epoch - len(self.train_losses))]
         if len(self.norm_error_feedback) != self.parameters.nb_epoch:
             self.norm_error_feedback = self.norm_error_feedback + [self.norm_error_feedback[-1] for i in range(self.parameters.nb_epoch - len(self.norm_error_feedback))]
-        if len(self.averaged_losses) != self.parameters.nb_epoch and self.parameters.use_averaging == True:
-            self.averaged_losses = self.averaged_losses + [self.averaged_losses[-1] for i in range(self.parameters.nb_epoch - len(self.averaged_losses))]
+        if len(self.averaged_train_losses) != self.parameters.nb_epoch and self.parameters.use_averaging == True:
+            self.averaged_train_losses = self.averaged_train_losses + [self.averaged_train_losses[-1] for i in range(self.parameters.nb_epoch - len(self.averaged_train_losses))]
         if len(self.dist_to_model) != self.parameters.nb_epoch:
             self.dist_to_model = self.dist_to_model + [self.dist_to_model[-1] for i in range(
                 self.parameters.nb_epoch - len(self.dist_to_model))]
@@ -238,16 +239,53 @@ class AGradientDescent(ABC):
             self.var_models = self.var_models + [self.var_models[-1] for i in range(
                 self.parameters.nb_epoch - len(self.var_models))]
 
-        self.losses = np.array(self.losses)
+        self.train_losses = np.array(self.train_losses)
         if self.parameters.verbose:
             print("Gradient Descent: execution time={t:.3f} seconds".format(t=elapsed_time))
-            print("Final loss : {0:.5f}\n".format(self.losses[-1]))
+            print("Final loss : {0:.5f}\n".format(self.train_losses[-1]))
 
+        del averaged_model_params
+        del current_model_param
+        del past_model
         return elapsed_time
+
+    def update_gradient_descent_info(self, past_model, cost_models):
+        self.train_losses.append(self.update.compute_cost(past_model, cost_models))
+        if self.parameters.randomized:
+            self.norm_error_feedback.append(
+                torch.norm(torch.mean(torch.stack(self.update.all_error_i[-1]), dim=0), p=2))
+            self.dist_to_model.append(np.mean(
+                [torch.norm(past_model - w.local_update.model_param) ** 2 for w in self.workers]
+            ))
+            self.var_models.append(torch.mean(
+                torch.var(torch.stack([w.local_update.model_param for w in self.workers]))
+            ))
+
+        else:
+            self.norm_error_feedback.append(torch.norm(self.update.all_error_i[-1], p=2))
+
+        self.dist_to_model.append(np.mean(
+            [torch.norm(past_model - w.local_update.model_param) ** 2 for w in self.workers]
+        ))
+        if self.optimal_grad is not None:
+            self.h_i_to_optimal_grad.append(np.mean(
+                [torch.norm(self.workers[i].local_update.h_i - self.optimal_grad[i]) ** 2 for i in range(len(self.workers))]
+            ))
+        # if (not self.parameters.randomized):
+        #     assert torch.all(torch.norm(past_model - self.workers[0].local_update.model_param) ** 2 == torch.tensor(0.0)), \
+        #         "The distance from central server and remote nodes is not null."
+        self.var_models.append(torch.mean(
+            torch.var(torch.stack([w.local_update.model_param for w in self.workers]))
+        ))
+        # The norm of error feedback has not been initialized. We initialize it now with the first value.
+        if len(self.norm_error_feedback) == 1:
+            self.norm_error_feedback.append(self.norm_error_feedback[0])
 
 
 class ArtemisDescent(AGradientDescent):
     """Implementation of Artemis.
+
+    Paradigm of Artemis: bidirectional compression, shares gardients, degrade central model.
 
     This implementation of Artemis is very flexible and incorporates several possibility. Mainly:
     1. add a moment
@@ -262,10 +300,10 @@ class ArtemisDescent(AGradientDescent):
     This features can switched on when defining Parameters.
     """
 
-    def __local_update__(self):
+    def __local_update__(self) -> AbstractLocalUpdate:
         return LocalArtemisUpdate
 
-    def __update_method__(self) -> AbstractGradientUpdate:
+    def __global_update__(self) -> AbstractGradientUpdate:
         return ArtemisUpdate(self.parameters, self.workers)
 
     def get_name(self) -> str:
@@ -273,17 +311,21 @@ class ArtemisDescent(AGradientDescent):
 
 
 class SGD_Descent(AGradientDescent):
+    """Implementation of the vanilla Stochastic Gradient Descent.
 
-    def __init__(self, parameters: Parameters) -> None:
-        super().__init__(parameters)
+    Paradigm of SGD: no compression, shares gardients.
+    """
+
+    def __init__(self, parameters: Parameters, algos_pickle_path: str) -> None:
+        super().__init__(parameters, algos_pickle_path)
         # Vanilla SGD doesn't carry out any compression.
         self.parameters.up_compression_model = SQuantization(0, self.parameters.n_dimensions)
         self.parameters.down_compression_model = SQuantization(0, self.parameters.n_dimensions)
 
-    def __local_update__(self):
+    def __local_update__(self) -> AbstractLocalUpdate:
         return LocalGradientVanillaUpdate
 
-    def __update_method__(self) -> AbstractGradientUpdate:
+    def __global_update__(self) -> AbstractGradientUpdate:
         return GradientVanillaUpdate(self.parameters, self.workers)
 
     def get_name(self) -> str:
@@ -291,27 +333,38 @@ class SGD_Descent(AGradientDescent):
 
 
 class DianaDescent(AGradientDescent):
+    """Implementation of Diana.
 
-    def __init__(self, parameters: Parameters) -> None:
-        super().__init__(parameters)
+    Paradigm of Diana: uplink compression, shares gardients, with or without up memories.
+    """
+    def __init__(self, parameters: Parameters, algos_pickle_path: str) -> None:
+        super().__init__(parameters, algos_pickle_path)
         # Diana doesn't carry out a down compression.
         self.parameters.down_compression_model = SQuantization(0, self.parameters.n_dimensions)
 
-    def __local_update__(self):
+    def __local_update__(self) -> AbstractLocalUpdate:
         return LocalDianaUpdate
 
-    def __update_method__(self) -> AbstractGradientUpdate:
+    def __global_update__(self) -> AbstractGradientUpdate:
         return DianaUpdate(self.parameters, self.workers)
 
     def get_name(self) -> str:
         return "Diana"
 
-class FedAvgDescent(AGradientDescent):
 
-    def __local_update__(self):
+class FedAvgDescent(AGradientDescent):
+    """Implementation of FedAvg.
+
+    Paradigm of FedAvg: no compression, shares models.
+    """
+    def __init__(self, parameters: Parameters, algos_pickle_path: str) -> None:
+        super().__init__(parameters, algos_pickle_path)
+        self.parameters.down_compression_model = SQuantization(0, self.parameters.n_dimensions)
+
+    def __local_update__(self) -> AbstractLocalUpdate:
         return LocalFedAvgUpdate
 
-    def __update_method__(self) -> AbstractGradientUpdate:
+    def __global_update__(self) -> AbstractGradientUpdate:
         return FedAvgUpdate(self.parameters, self.workers)
 
     def __number_iterations__(self, cost_models) -> int:
@@ -332,24 +385,34 @@ class FedAvgDescent(AGradientDescent):
         return "FedAvg"
 
 class DownCompressModelDescent(AGradientDescent):
+    """Implementation of MCM like algorithm.
 
-    def __local_update__(self):
+    Paradigm of MCM: uplink compression of gradient, downlink compression of model, with or without memories,
+                     preserve the central model.
+    """
+    def __local_update__(self) -> AbstractLocalUpdate:
         return LocalDownCompressModelUpdate
 
-    def __update_method__(self) -> AbstractGradientUpdate:
+    def __global_update__(self) -> AbstractGradientUpdate:
         return DownCompressModelUpdate(self.parameters, self.workers)
 
     def get_name(self) -> str:
         return "DwnComprModel"
 
 
-class SympaDescent(AGradientDescent):
+class GhostDescent(AGradientDescent):
+    """Implementation of Ghost algorithm define in Philippenko et al., 2021.
+    This algorithm is impossible to implement in real life.
 
-    def __local_update__(self):
-        return LocalSympaUpdate
+    Paradigm of Ghost: uplink compression of gradient, downlink compression of model, with or without memories,
+    preserve the central model. Ghost updates the local model using the global model (which is impossible in practice).
+    """
 
-    def __update_method__(self) -> AbstractGradientUpdate:
-        return SympaUpdate(self.parameters, self.workers)
+    def __local_update__(self) -> AbstractLocalUpdate:
+        return LocalGhostUpdate
+
+    def __global_update__(self) -> AbstractGradientUpdate:
+        return GhostUpdate(self.parameters, self.workers)
 
     def get_name(self) -> str:
-        return "Sympa"
+        return "Ghost"

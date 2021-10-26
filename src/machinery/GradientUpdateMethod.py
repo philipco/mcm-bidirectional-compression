@@ -1,8 +1,8 @@
 """
 Created by Philippenko, 6 January 2020.
 
-This class defines the update methods which will be used during the gradient descent. It aim to implement the update
-scheme used on the central server.
+This class defines the global update methods which will be used during the gradient descent.
+It aims to implement the update scheme used on the central server.
 
 To add a new update scheme, just extend the abstract class AbstractGradientUpdate which contains methods:
 1. to compute the cost at present model's parameters
@@ -13,6 +13,7 @@ To add a new update scheme, just extend the abstract class AbstractGradientUpdat
 from __future__ import annotations
 
 from abc import ABC, abstractmethod, ABCMeta
+from math import sqrt
 
 import torch
 from typing import Tuple
@@ -23,7 +24,9 @@ from src.machinery.Parameters import Parameters
 
 class AbstractGradientUpdate(ABC):
     """
-    The  interface declares the operations that all concrete products of AGradient Descent must implement.
+    The AbstractGradientUpdate class declares the factory methods while subclasses provide the implementation of this methods.
+
+    This class carries out the update of the global model held on the central server.
     """
 
     time_sample = 0
@@ -40,20 +43,11 @@ class AbstractGradientUpdate(ABC):
         return loss.item()
 
     @abstractmethod
-    def compute(self, model_param: torch.FloatTensor, cost_models, nb_it: int, j: int) \
+    def compute(self, model_param: torch.FloatTensor, cost_models, full_nb_iterations: int, nb_inside_it: int) \
             -> Tuple[torch.FloatTensor, torch.FloatTensor]:
         """Compute the model's update.
 
-        This  method must update the model's parameter according to the scheme.
-
-        Args:
-            model_param: this is used only for initialization at iteration k=1. Deprecated, should be removed !
-            nb_it: index of epoch (iteration over full local data)
-            j: index of inside iterations
-
-        Returns:
-            the new model.
-
+        :param full_nb_iterations: total number of computed iteration.
         """
         pass
 
@@ -67,6 +61,7 @@ class AbstractGradientUpdate(ABC):
 
 
 class AbstractFLUpdate(AbstractGradientUpdate, metaclass=ABCMeta):
+    """An abstract class common to all algorithm using a FL paradigm."""
 
     def __init__(self, parameters: Parameters, workers) -> None:
         super().__init__(parameters)
@@ -75,7 +70,12 @@ class AbstractFLUpdate(AbstractGradientUpdate, metaclass=ABCMeta):
         self.all_delta_i = []
 
         # Local memories hold on the central server.
-        self.h = [torch.zeros(parameters.n_dimensions, dtype=np.float) for k in range(self.parameters.nb_devices)]
+        if not self.parameters.use_unique_up_memory:
+            if self.parameters.use_up_memory: print("Using multiple up memories.")
+            self.h = [torch.zeros(parameters.n_dimensions, dtype=np.float) for k in range(self.parameters.nb_devices)]
+        else:
+            if self.parameters.use_up_memory: print("Using a single up memory.")
+            self.h = torch.zeros(parameters.n_dimensions, dtype=np.float)
 
         # Omega : used to update the model on central server.
         self.omega = torch.zeros(parameters.n_dimensions, dtype=np.float)
@@ -100,27 +100,39 @@ class AbstractFLUpdate(AbstractGradientUpdate, metaclass=ABCMeta):
             self.all_error_i = [torch.zeros(parameters.n_dimensions, dtype=np.float)]
 
         # Memory for bidirectional compression:
-        if self.parameters.randomized:
+        if self.parameters.randomized and not self.parameters.use_unique_down_memory:
+            if self.parameters.use_down_memory: print("Using multiple down memories.")
             self.H = [torch.zeros(parameters.n_dimensions, dtype=np.float) for _ in range(self.parameters.nb_devices)]
         else:
+            if self.parameters.use_down_memory: print("Using a single down memory.")
             self.H = torch.zeros(parameters.n_dimensions, dtype=np.float)
 
+    def update_model(self, model_param):
+        """Updates the central model."""
+        self.v = self.parameters.momentum * self.v + self.g
+        return model_param - self.step * self.v
+
     def compute_aggregation(self, local_information_to_aggregate):
+        """Aggregates all gradients/models received from remote workers."""
         # In Artemis there is no weight associated with the aggregation, all nodes must have the same weight equal
         # to 1 / len(workers), this is why, an average is enough.
         true_mean = torch.stack(local_information_to_aggregate).mean(0)
         approximate_mean = torch.stack(local_information_to_aggregate).sum(0) / (self.parameters.fraction_sampled_workers * self.parameters.nb_devices)
         if self.parameters.fraction_sampled_workers == 1.:
-            assert true_mean.equal(approximate_mean), "The true and approximate means are not equal !"
+            # If tensors are both NAN, torch return False.
+            if not (torch.isnan(approximate_mean).any() and torch.isnan(true_mean).any()):
+                assert true_mean.equal(approximate_mean), "The true and approximate means are not equal !"
         return approximate_mean
 
     def compute_full_gradients(self, model_param):
+        """Compute the gradient by using the full dataset held by each worker."""
         grad = 0
         for worker in self.workers:
-            grad += worker.cost_model.grad(model_param)
+            grad = grad + worker.cost_model.grad(model_param)
         return grad / len(self.workers)
 
     def compute_cost(self, model_param, cost_models):
+        """Compute the loss by iterating over all worker."""
         all_loss_i = []
         for worker, cost_model in zip(self.workers, cost_models):
             loss_i, _ = cost_model.cost(model_param)
@@ -128,6 +140,7 @@ class AbstractFLUpdate(AbstractGradientUpdate, metaclass=ABCMeta):
         return np.mean(all_loss_i)
 
     def sampling_devices(self, cost_models):
+        """Samples devices that will be active at this round."""
         self.workers_sub_set = []
         # Sampling workers until there is at least one in the subset.
         if self.parameters.fraction_sampled_workers == 1:
@@ -140,6 +153,7 @@ class AbstractFLUpdate(AbstractGradientUpdate, metaclass=ABCMeta):
                                         for i in range(self.parameters.nb_devices) if s[i]]
 
     def initialization(self, nb_it: int, model_param: torch.FloatTensor, L: float, cost_models):
+        """Initialize a new round of communication."""
 
         self.sampling_devices(cost_models)
 
@@ -159,9 +173,9 @@ class AbstractFLUpdate(AbstractGradientUpdate, metaclass=ABCMeta):
                 worker.local_update.set_initial_v(self.v)
 
         self.all_delta_i = []
-        self.all_delta_i = []
 
     def get_set_of_workers(self, cost_models, all=False):
+        """Get the set of active workers."""
         if all:
             result = list(zip(self.workers, cost_models))
         else:
@@ -171,25 +185,33 @@ class AbstractFLUpdate(AbstractGradientUpdate, metaclass=ABCMeta):
         return result
 
     def build_randomized_omega(self, cost_models):
+        """Build omega in a context of a randomized algorithm (like Rand-MCM).
+         Omega is the vector that sent to remote workers"""
         randomized_omega_k = [torch.zeros(self.parameters.n_dimensions, dtype=np.float)
                                 for i in range(self.parameters.nb_devices)]
         for (worker, cost_model) in self.get_set_of_workers(cost_models):
             randomized_omega_k[worker.ID] = self.parameters.down_compression_model.compress(self.value_to_compress[worker.ID])
+        del randomized_omega_k
         self.omega = randomized_omega_k
         self.omega_k.append(self.omega)
 
     def build_omega(self):
+        """Build omega, the vector that is sent to remote workers"""
         self.omega = self.parameters.down_compression_model.compress(self.value_to_compress)
         self.omega_k.append(self.omega)
 
     def perform_down_compression(self, value_to_consider, cost_models):
+        """Perfoms down compression."""
 
         # We combine with EF and memory to obtain the proper value that will be compressed
-        if self.parameters.randomized:
-            self.value_to_compress = [(value_to_consider - self.H[i]) + self.all_error_i[-1][i] * self.parameters.down_learning_rate
+        if self.parameters.randomized and not self.parameters.use_unique_down_memory:
+            self.value_to_compress = [(value_to_consider - self.H[i]) + self.all_error_i[-1][i] * self.parameters.error_feedback_coef
+                                      for i in range(self.parameters.nb_devices)]
+        elif self.parameters.randomized and self.parameters.use_unique_down_memory:
+            self.value_to_compress = [(value_to_consider - self.H) + self.all_error_i[-1][i] * self.parameters.error_feedback_coef
                                       for i in range(self.parameters.nb_devices)]
         else:
-            self.value_to_compress = (value_to_consider - self.H) + self.all_error_i[-1] * self.parameters.down_learning_rate
+            self.value_to_compress = (value_to_consider - self.H) + self.all_error_i[-1] * self.parameters.error_feedback_coef
 
         # We build omega i.e, what will be sent to remote devices
         if self.parameters.randomized:
@@ -220,6 +242,52 @@ class AbstractFLUpdate(AbstractGradientUpdate, metaclass=ABCMeta):
             if self.parameters.fraction_sampled_workers == 1.:
                 assert len(self.omega_k[worker.idx_last_update:]) == 1
             worker.idx_last_update = len(self.omega_k)
+            
+    def receive_all_delta(self, cost_models, full_nb_iterations: int):
+        """Retrieve all deltas, which are the vectors sent by all remote workers."""
+
+        # Warning, if one wants to run the case when subset are updating, but then al devices are updated,
+        # the following lines must be changed.
+        for worker, cost_model in self.get_set_of_workers(cost_models):
+            # We get all the compressed gradient computed on each worker.
+            compressed_delta_i = worker.local_update.compute_locally(cost_model, full_nb_iterations)
+
+            # Smart initialisation of the memory (it corresponds to the first computed gradient).
+            if self.parameters.fraction_sampled_workers==1: # TODO : There is issue with PP and multiple memories
+                if full_nb_iterations == 1 and self.parameters.use_up_memory:
+                    if self.parameters.use_unique_up_memory:
+                        self.h = self.h + worker.local_update.h_i / len(self.get_set_of_workers(cost_models))
+                    if not self.parameters.use_unique_up_memory:
+                        self.h[worker.ID] = worker.local_update.h_i
+
+            # If nothing is returned by the device, this device does not participate to the learning at this iterations.
+            # This may happened if it is considered that during one epoch each devices should run through all its data
+            # exactly once, and if there is different numbers of points on each device.
+            if compressed_delta_i is not None:
+                if self.parameters.use_unique_up_memory:
+                    self.all_delta_i.append(compressed_delta_i)
+                else:
+                    self.all_delta_i.append(compressed_delta_i + self.h[worker.ID])
+            if self.parameters.use_up_memory and not self.parameters.use_unique_up_memory:
+                self.h[worker.ID] = self.h[worker.ID] + self.parameters.up_learning_rate * compressed_delta_i
+
+        all_delta = self.compute_aggregation(self.all_delta_i)
+
+        # Aggregating all delta
+        self.g = all_delta + [0, self.h][self.parameters.use_unique_up_memory]
+
+        if self.parameters.use_up_memory and self.parameters.use_unique_up_memory:
+            self.h = self.h + self.parameters.up_learning_rate * all_delta
+
+        if self.parameters.up_compression_model.level != 0:
+            if self.parameters.use_up_memory and self.parameters.use_unique_up_memory:
+                assert isinstance(self.h, torch.Tensor), "Up memory is not a tensor."
+                assert not torch.equal(self.h, torch.zeros(self.parameters.n_dimensions, dtype=np.float)), "Up memory is still null."
+            if self.parameters.use_up_memory and not self.parameters.use_unique_up_memory:
+                assert not isinstance(self.h, torch.FloatTensor) and len(self.h) == self.parameters.nb_devices, \
+                    "Up memory should be a list of length equal to the number of devices."
+                # assert all([not torch.equal(e, torch.zeros(self.parameters.n_dimensions, dtype=np.float)) for e in self.h]), \
+                #     "Up memories are still null."
 
 
 class ArtemisUpdate(AbstractFLUpdate):
@@ -235,7 +303,7 @@ class ArtemisUpdate(AbstractFLUpdate):
     def update_model(self, model_param):
         if self.parameters.non_degraded:
             self.v = self.parameters.momentum * self.v + self.g
-        elif self.parameters.randomized:
+        elif self.parameters.randomized and not self.parameters.use_unique_down_memory:
             self.v = self.parameters.momentum * self.v + (torch.mean(torch.stack(self.omega + self.H), dim=0))
         else:
             self.v = self.parameters.momentum * self.v + (self.omega + self.H)
@@ -247,31 +315,18 @@ class ArtemisUpdate(AbstractFLUpdate):
 
         self.initialization(full_nb_iterations, model_param, cost_models[0].L, cost_models)
 
-        # Warning, if one wants to run the case when subset are updating, but then al devices are updated,
-        # the following lines must be changed.
-        for worker, cost_model in self.get_set_of_workers(cost_models):
-            # We get all the compressed gradient computed on each worker.
-            compressed_delta_i = worker.local_update.compute_locally(cost_model, nb_inside_it)
-
-            # If nothing is returned by the device, this device does not participate to the learning at this iterations.
-            # This may happened if it is considered that during one epoch each devices should run through all its data
-            # exactly once, and if there is different numbers of points on each device.
-            if compressed_delta_i is not None:
-                self.all_delta_i.append(compressed_delta_i + self.h[worker.ID])
-                self.h[worker.ID] += self.parameters.up_learning_rate * compressed_delta_i
-
-        # Aggregating all delta
-        self.g = self.compute_aggregation(self.all_delta_i)
+        self.receive_all_delta(cost_models, full_nb_iterations)
 
         self.perform_down_compression(self.g, cost_models)
         model_param = self.update_model(model_param)
 
         # Update the second memory if we are using bidirectional compression and if this feature has been turned on.
         if self.parameters.use_down_memory:
-            self.H += self.parameters.down_learning_rate * self.omega
+            self.H = self.H + self.parameters.down_learning_rate * self.omega
         return model_param
 
-class SympaUpdate(AbstractFLUpdate):
+
+class GhostUpdate(AbstractFLUpdate):
 
     def __init__(self, parameters: Parameters, workers) -> None:
         super().__init__(parameters, workers)
@@ -303,18 +358,18 @@ class SympaUpdate(AbstractFLUpdate):
             all_local_models.append(local_model)
         return all_local_models
 
-    def compute(self, model_param: torch.FloatTensor, cost_models, nb_it: int, j: int) \
+    def compute(self, model_param: torch.FloatTensor, cost_models, full_nb_iterations: int, nb_inside_it: int) \
             -> Tuple[torch.FloatTensor, torch.FloatTensor]:
 
-        self.initialization(nb_it, model_param, cost_models[0].L, cost_models)
+        self.initialization(full_nb_iterations, model_param, cost_models[0].L, cost_models)
 
         for worker, cost_model in self.get_set_of_workers(cost_models, all=True):
             # We send previously computed gradients,
             # and carry out the update step which has just been done on the central server.
-            compressed_delta_i = worker.local_update.compute_locally(cost_model, j)
+            compressed_delta_i = worker.local_update.compute_locally(cost_model, nb_inside_it)
             if compressed_delta_i is not None:
                 self.all_delta_i.append(compressed_delta_i + self.h[worker.ID])
-                self.h[worker.ID] += self.parameters.up_learning_rate * compressed_delta_i
+                self.h[worker.ID] = self.h[worker.ID] + self.parameters.up_learning_rate * compressed_delta_i
 
         # Aggregating all delta
         self.g = self.compute_aggregation(self.all_delta_i)
@@ -341,38 +396,46 @@ class DownCompressModelUpdate(AbstractFLUpdate):
         self.omega_k.append(self.omega)
 
     def send_back_global_informations_and_update(self, cost_models):
+        update_H_i = torch.zeros(self.parameters.n_dimensions, dtype=np.float)
         for worker, _ in self.get_set_of_workers(cost_models):
             # We just have to send what has been compressed (i.e omega).
             if self.parameters.randomized:
                 models_to_send = self.omega[worker.ID]
             else:
                 models_to_send = self.omega
-            worker.local_update.send_global_informations_and_update_local_param(models_to_send, self.step)
+            if self.parameters.use_unique_down_memory and self.parameters.reset_memories and \
+                    worker.full_nb_iterations % 4 * sqrt(self.parameters.n_dimensions) == 0:
+                worker.local_update.send_global_informations_and_update_local_param(models_to_send, self.step, self.H)
+            else:
+                worker.local_update.send_global_informations_and_update_local_param(models_to_send, self.step)
             # Update the second memory if we are using bidirectional compression and if this feature has been turned on.
-            if self.parameters.use_down_memory and self.parameters.randomized:
+            if self.parameters.use_down_memory and self.parameters.randomized and not self.parameters.use_unique_down_memory:
                 self.H[worker.ID] = self.H[worker.ID] + self.parameters.down_learning_rate * self.omega[worker.ID]
+            elif self.parameters.use_down_memory and self.parameters.randomized and self.parameters.use_unique_down_memory:
+                update_H_i = update_H_i + self.parameters.down_learning_rate * self.omega[worker.ID] / self.parameters.nb_devices
+        if self.parameters.use_down_memory and self.parameters.randomized and self.parameters.use_unique_down_memory:
+            self.H = self.H + update_H_i
         if self.parameters.use_down_memory and not self.parameters.randomized:
             self.H = self.H + self.parameters.down_learning_rate * self.omega
 
-    def update_model(self, model_param):
-        self.v = self.parameters.momentum * self.v + self.g
-        return model_param - self.step * self.v
+        if self.parameters.use_down_memory and self.parameters.use_unique_down_memory:
+            assert isinstance(self.H, torch.Tensor), "Down memory is not a tensor."
+        if self.parameters.use_down_memory and not self.parameters.use_unique_down_memory:
+            assert not isinstance(self.H, torch.Tensor) and len(self.H) == self.parameters.nb_devices, \
+                "Down memory should be a list of length equal to the number of devices."
+            assert any([not torch.equal(e, torch.zeros(self.parameters.n_dimensions, dtype=np.float)) for e in self.H]),\
+                "Down memory are still null."
 
-    def compute(self, model_param: torch.FloatTensor, cost_models, nb_it: int, j: int) \
+
+    def compute(self, model_param: torch.FloatTensor, cost_models, full_nb_iterations: int, nb_inside_it: int) \
             -> Tuple[torch.FloatTensor, torch.FloatTensor]:
 
-        self.initialization(nb_it, model_param, cost_models[0].L, cost_models)
+        for worker, _ in self.get_set_of_workers(cost_models, all=True):
+            worker.full_nb_iterations = full_nb_iterations
 
-        for worker, cost_model in self.get_set_of_workers(cost_models):
-            # We send previously computed gradients,
-            # and carry out the update step which has just been done on the central server.
-            compressed_delta_i = worker.local_update.compute_locally(cost_model, j)
-            if compressed_delta_i is not None:
-                self.all_delta_i.append(compressed_delta_i + self.h[worker.ID])
-                self.h[worker.ID] += self.parameters.up_learning_rate * compressed_delta_i
+        self.initialization(full_nb_iterations, model_param, cost_models[0].L, cost_models)
 
-        # Aggregating all delta
-        self.g = self.compute_aggregation(self.all_delta_i)
+        self.receive_all_delta(cost_models, full_nb_iterations)
 
         model_param = self.update_model(model_param)
         self.perform_down_compression(model_param, cost_models)
@@ -388,7 +451,7 @@ class FedAvgUpdate(AbstractFLUpdate):
     def __init__(self, parameters: Parameters, workers) -> None:
         super().__init__(parameters, workers)
 
-    def compute(self, model_param: torch.FloatTensor, cost_models, full_nb_iterations: int, j: int) \
+    def compute(self, model_param: torch.FloatTensor, cost_models, full_nb_iterations: int, nb_inside_it: int) \
             -> Tuple[torch.FloatTensor, torch.FloatTensor]:
 
         self.initialization(full_nb_iterations, model_param, cost_models[0].L, cost_models)
@@ -399,7 +462,7 @@ class FedAvgUpdate(AbstractFLUpdate):
 
         for worker, cost_model in self.get_set_of_workers(cost_models):
             local_nb_points = cost_model.X.shape[0]
-            local_model = worker.local_update.compute_locally(cost_model, j, self.step) + model_param
+            local_model = worker.local_update.compute_locally(cost_model, nb_inside_it, self.step) + model_param
             local_models.append(local_model * local_nb_points / total_nb_of_points)
 
         model_param = torch.sum(torch.stack(local_models, dim=0), dim=0)
@@ -425,23 +488,14 @@ class DianaUpdate(AbstractFLUpdate):
 
         self.value_to_compress = torch.zeros(parameters.n_dimensions, dtype=np.float)
 
-    def compute(self, model_param: torch.FloatTensor, cost_models, nb_it: int, j: int) \
+    def compute(self, model_param: torch.FloatTensor, cost_models, full_nb_iterations: int, nb_inside_it: int) \
             -> Tuple[torch.FloatTensor, torch.FloatTensor]:
 
-        self.initialization(nb_it, model_param, cost_models[0].L, cost_models)
+        self.initialization(full_nb_iterations, model_param, cost_models[0].L, cost_models)
 
-        for worker, cost_model in self.get_set_of_workers(cost_models):
-            # We send previously computed gradients,
-            # and carry out the update step which has just been done on the central server.
-            compressed_delta_i = worker.local_update.compute_locally(cost_model, j)
-            if compressed_delta_i is not None:
-                self.all_delta_i.append(compressed_delta_i + self.h[worker.ID])
-                self.h[worker.ID] += self.parameters.up_learning_rate * compressed_delta_i
+        self.receive_all_delta(cost_models, full_nb_iterations)
 
-        # Aggregating all delta
-        self.g = self.compute_aggregation(self.all_delta_i)
-        self.v = self.parameters.momentum * self.v + self.g
-        model_param = model_param - self.v * self.step
+        model_param = self.update_model(model_param)
 
         self.omega = self.g
         self.omega_k.append(self.omega)
@@ -451,24 +505,14 @@ class DianaUpdate(AbstractFLUpdate):
 
 class GradientVanillaUpdate(AbstractFLUpdate):
 
-    def compute(self, model_param: torch.FloatTensor, cost_models, nb_it: int, j: int) \
+    def compute(self, model_param: torch.FloatTensor, cost_models, full_nb_iterations: int, nb_inside_it: int) \
             -> Tuple[torch.FloatTensor, torch.FloatTensor]:
 
-        self.initialization(nb_it, model_param, cost_models[0].L, cost_models)
+        self.initialization(full_nb_iterations, model_param, cost_models[0].L, cost_models)
 
-        for worker, cost_model in self.get_set_of_workers(cost_models):
-            # We send previously computed gradients,
-            # and carry out the update step which has just been done on the central server.
-            delta_i = worker.local_update.compute_locally(cost_model, j)
-            if delta_i is not None:
-                self.all_delta_i.append(self.h[worker.ID] + delta_i)
-                self.h[worker.ID] += self.parameters.up_learning_rate * delta_i
+        self.receive_all_delta(cost_models, full_nb_iterations)
 
-        # Aggregating all delta
-        self.g = self.compute_aggregation(self.all_delta_i)
-        self.v = self.parameters.momentum * self.v + self.g
-
-        model_param = model_param - self.v * self.step
+        model_param = self.update_model(model_param)
 
         # We update omega (compression of the sum of compressed gradients).
         self.omega = self.g
