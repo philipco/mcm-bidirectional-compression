@@ -1,8 +1,7 @@
 # Bidirectional compression for distributed or federated learning
 
-We present here the code of the experimental parts of the following two papers:
-1. [Bidirectional compression in heterogeneous settings for distributed or federated learning with partial participation: tight convergence guarantees](https://arxiv.org/pdf/2006.14591.pdf),
-2. [Preserved central model for faster bidirectional compression in distributed settings](https://arxiv.org/pdf/2102.12528.pdf).
+We present here the code of the experimental parts of the following paper accepted at NeurIPS 2021:
+[Preserved central model for faster bidirectional compression in distributed settings](https://arxiv.org/pdf/2102.12528.pdf).
 
 This code has been written by Constantin Philippenko, and is a jointly work with Aymeric Dieuleveut  at Ecole Polytechnique.
 
@@ -86,23 +85,14 @@ To install them automatically: `pip install -r requirements.txt`
 [MIT](LICENSE) © Constantin Philippenko
 
 # References
-If you use this code, please cite the following papers
+If you use this code, please cite the following paper:
 
 ```
-@article{philippenko2020artemis,
-  title={Artemis: tight convergence guarantees for bidirectional compression in federated learning},
-  author={Philippenko, Constantin and Dieuleveut, Aymeric},
-  journal={arXiv e-prints},
-  pages={arXiv--2006},
-  year={2020}
-}
-```
-
-```
-@article{philippenko2021preserved,
+@inproceedings{philippenko_2021_preserved,
   title={Preserved central model for faster bidirectional compression in distributed settings},
   author={Philippenko, Constantin and Dieuleveut, Aymeric},
-  journal={arXiv preprint arXiv:2102.12528},
+  booktitle = {Advances in Neural Information Processing Systems},
+  volume = {33},
   year={2021}
 }
 ```

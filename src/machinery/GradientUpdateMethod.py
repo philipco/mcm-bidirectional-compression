@@ -113,7 +113,7 @@ class AbstractFLUpdate(AbstractGradientUpdate, metaclass=ABCMeta):
         return model_param - self.step * self.v
 
     def compute_aggregation(self, local_information_to_aggregate):
-        """Aggregates all gradientds/models received from remote workers."""
+        """Aggregates all gradients/models received from remote workers."""
         # In Artemis there is no weight associated with the aggregation, all nodes must have the same weight equal
         # to 1 / len(workers), this is why, an average is enough.
         true_mean = torch.stack(local_information_to_aggregate).mean(0)
